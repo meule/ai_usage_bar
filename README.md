@@ -4,6 +4,8 @@ macOS menu bar app that shows your Claude Code API usage limits at a glance.
 
 Displays 5-hour session, 7-day week, and 7-day Sonnet utilization with reset times.
 
+![screenshot](screenshot.png)
+
 ## Install
 
 ```bash
