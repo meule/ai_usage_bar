@@ -60,9 +60,6 @@ class UsageViewModel: ObservableObject {
                 self.sevenDaySonnet = usage.seven_day_sonnet
             } catch {
                 self.errorMessage = error.localizedDescription
-                self.fiveHour = nil
-                self.sevenDay = nil
-                self.sevenDaySonnet = nil
             }
             self.isLoading = false
         }
