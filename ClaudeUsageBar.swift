@@ -14,6 +14,43 @@ struct UsageResponse: Codable {
     let seven_day_sonnet: UsageBucket?
 }
 
+struct CodexRateLimitWindow: Codable {
+    let usedPercent: Int
+    let resetsAt: Int?
+    let windowDurationMins: Int?
+}
+
+struct CodexCreditsSnapshot: Codable {
+    let balance: String?
+    let hasCredits: Bool
+    let unlimited: Bool
+}
+
+struct CodexRateLimitSnapshot: Codable {
+    let limitId: String?
+    let limitName: String?
+    let primary: CodexRateLimitWindow?
+    let secondary: CodexRateLimitWindow?
+    let credits: CodexCreditsSnapshot?
+    let planType: String?
+}
+
+struct CodexRateLimitsResponse: Codable {
+    let rateLimits: CodexRateLimitSnapshot
+    let rateLimitsByLimitId: [String: CodexRateLimitSnapshot]?
+}
+
+struct CodexRPCError: Codable {
+    let code: Int
+    let message: String
+}
+
+struct CodexRPCEnvelope<T: Decodable>: Decodable {
+    let id: Int?
+    let result: T?
+    let error: CodexRPCError?
+}
+
 // MARK: - ViewModel
 
 @MainActor
@@ -21,6 +58,9 @@ class UsageViewModel: ObservableObject {
     @Published var fiveHour: UsageBucket?
     @Published var sevenDay: UsageBucket?
     @Published var sevenDaySonnet: UsageBucket?
+    @Published var codexLimits: CodexRateLimitSnapshot?
+    @Published var codexNeedsLogin = false
+    @Published var codexErrorMessage: String?
     @Published var errorMessage: String?
     @Published var isLoading = false
 
@@ -31,10 +71,16 @@ class UsageViewModel: ObservableObject {
     }
 
     var menuBarTitle: String {
-        if let sevenDay = sevenDay {
-            return "C: \(Int(sevenDay.utilization))%"
+        let claudePart = sevenDay.map { "C:\(Int($0.utilization))%" } ?? "C:?"
+        let codexPart: String
+        if let weekly = codexLimits?.secondary?.usedPercent {
+            codexPart = "O:\(weekly)%"
+        } else if codexNeedsLogin {
+            codexPart = "O:login"
+        } else {
+            codexPart = "O:?"
         }
-        return "C: ?"
+        return "\(claudePart) \(codexPart)"
     }
 
     func startPolling() {
@@ -50,6 +96,7 @@ class UsageViewModel: ObservableObject {
         guard !isLoading else { return }
         isLoading = true
         errorMessage = nil
+        codexErrorMessage = nil
 
         Task {
             do {
@@ -59,7 +106,22 @@ class UsageViewModel: ObservableObject {
                 self.sevenDay = usage.seven_day
                 self.sevenDaySonnet = usage.seven_day_sonnet
             } catch {
-                self.errorMessage = error.localizedDescription
+                self.errorMessage = "Claude: \(error.localizedDescription)"
+            }
+
+            do {
+                let codex = try await fetchCodexRateLimits()
+                self.codexLimits = preferredCodexSnapshot(from: codex)
+                self.codexNeedsLogin = false
+            } catch {
+                self.codexLimits = nil
+                let message = error.localizedDescription
+                if isCodexLoginError(message) {
+                    self.codexNeedsLogin = true
+                } else {
+                    self.codexNeedsLogin = false
+                    self.codexErrorMessage = "Codex: \(message)"
+                }
             }
             self.isLoading = false
         }
@@ -114,6 +176,108 @@ class UsageViewModel: ObservableObject {
 
         return try JSONDecoder().decode(UsageResponse.self, from: data)
     }
+
+    private func fetchCodexRateLimits() async throws -> CodexRateLimitsResponse {
+        guard let codexPath = resolveCodexExecutable() else {
+            throw URLError(.fileDoesNotExist, userInfo: [
+                NSLocalizedDescriptionKey: "codex CLI not found"
+            ])
+        }
+
+        // Run blocking I/O on a background thread so it never stalls the main actor.
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: codexPath)
+                process.arguments = ["app-server"]
+
+                let inputPipe = Pipe()
+                let outputPipe = Pipe()
+                process.standardInput = inputPipe
+                process.standardOutput = outputPipe
+                process.standardError = Pipe()
+
+                do { try process.run() } catch {
+                    continuation.resume(throwing: error)
+                    return
+                }
+
+                let initMsg = Data("{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"ClaudeUsageBar\",\"version\":\"1.0\"},\"capabilities\":{}}}\n".utf8)
+                let rateMsg = Data("{\"id\":2,\"method\":\"account/rateLimits/read\",\"params\":null}\n".utf8)
+                inputPipe.fileHandleForWriting.write(initMsg)
+                inputPipe.fileHandleForWriting.write(rateMsg)
+
+                // Kill process if no response within 15 seconds.
+                let killWork = DispatchWorkItem { if process.isRunning { process.terminate() } }
+                DispatchQueue.global().asyncAfter(deadline: .now() + 15, execute: killWork)
+
+                // Read byte-by-byte to build lines (blocking, safe on background thread).
+                let handle = outputPipe.fileHandleForReading
+                let decoder = JSONDecoder()
+                var lineData = Data()
+                var resumed = false
+
+                while !resumed {
+                    let byte = handle.readData(ofLength: 1)
+                    if byte.isEmpty { break } // EOF — process terminated
+                    if byte == Data([UInt8(ascii: "\n")]) {
+                        defer { lineData = Data() }
+                        guard !lineData.isEmpty,
+                              let env = try? decoder.decode(CodexRPCEnvelope<CodexRateLimitsResponse>.self, from: lineData),
+                              env.id == 2 else { continue }
+
+                        killWork.cancel()
+                        process.terminate()
+                        resumed = true
+
+                        if let result = env.result {
+                            continuation.resume(returning: result)
+                        } else if let rpcError = env.error {
+                            continuation.resume(throwing: URLError(.cannotParseResponse, userInfo: [
+                                NSLocalizedDescriptionKey: "Codex RPC \(rpcError.code): \(rpcError.message)"
+                            ]))
+                        } else {
+                            continuation.resume(throwing: URLError(.badServerResponse))
+                        }
+                    } else {
+                        lineData.append(byte)
+                    }
+                }
+
+                if !resumed {
+                    continuation.resume(throwing: URLError(.timedOut, userInfo: [
+                        NSLocalizedDescriptionKey: "No response from codex app-server"
+                    ]))
+                }
+            }
+        }
+    }
+
+    private func preferredCodexSnapshot(from response: CodexRateLimitsResponse) -> CodexRateLimitSnapshot {
+        if let codex = response.rateLimitsByLimitId?["codex"] {
+            return codex
+        }
+        if let any = response.rateLimitsByLimitId?.values.first {
+            return any
+        }
+        return response.rateLimits
+    }
+
+    private func resolveCodexExecutable() -> String? {
+        let candidates = [
+            "/usr/local/bin/codex",
+            "/opt/homebrew/bin/codex",
+            "/usr/bin/codex"
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    private func isCodexLoginError(_ message: String) -> Bool {
+        let lowered = message.lowercased()
+        return lowered.contains("not signed in")
+            || lowered.contains("run 'codex login'")
+            || lowered.contains("run `codex login`")
+    }
 }
 
 // MARK: - Helpers
@@ -128,6 +292,16 @@ func parseISO(_ iso: String) -> Date? {
 
 func formatResetTime(_ iso: String?) -> String {
     guard let iso = iso, let date = parseISO(iso) else { return "unknown" }
+    return formatResetTime(date)
+}
+
+func formatResetTime(epochSeconds: Int?) -> String {
+    guard let epochSeconds else { return "unknown" }
+    let date = Date(timeIntervalSince1970: TimeInterval(epochSeconds))
+    return formatResetTime(date)
+}
+
+func formatResetTime(_ date: Date) -> String {
     let rel = RelativeDateTimeFormatter()
     rel.unitsStyle = .abbreviated
     let relative = rel.localizedString(for: date, relativeTo: Date())
@@ -141,6 +315,11 @@ func formatResetTime(_ iso: String?) -> String {
 
 func pct(_ value: Double) -> String {
     "\(Int(value))%"
+}
+
+func pct(_ value: Int?) -> String {
+    guard let value else { return "?" }
+    return "\(value)%"
 }
 
 // MARK: - App
@@ -157,22 +336,53 @@ struct ClaudeUsageBarApp: App {
             }
 
             if let fh = vm.fiveHour {
-                Text("5-Hour Session: \(pct(fh.utilization))")
+                Text("Claude 5-Hour Session: \(pct(fh.utilization))")
                 Text("  resets \(formatResetTime(fh.resets_at))")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
 
             if let sd = vm.sevenDay {
-                Text("7-Day Week: \(pct(sd.utilization))")
+                Text("Claude 7-Day Week: \(pct(sd.utilization))")
                 Text("  resets \(formatResetTime(sd.resets_at))")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
 
             if let ss = vm.sevenDaySonnet {
-                Text("7-Day Sonnet: \(pct(ss.utilization))")
+                Text("Claude 7-Day Sonnet: \(pct(ss.utilization))")
                 Text("  resets \(formatResetTime(ss.resets_at))")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            if let codex = vm.codexLimits {
+                Divider()
+
+                Text("Codex 5-Hour Session: \(pct(codex.primary?.usedPercent))")
+                Text("  resets \(formatResetTime(epochSeconds: codex.primary?.resetsAt))")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                Text("Codex 7-Day Week: \(pct(codex.secondary?.usedPercent))")
+                Text("  resets \(formatResetTime(epochSeconds: codex.secondary?.resetsAt))")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                if let plan = codex.planType {
+                    Text("Codex Plan: \(plan)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            } else if vm.codexNeedsLogin {
+                Divider()
+                Text("Codex: not logged in")
+                Text("  run `codex login` in Terminal")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else if let codexErr = vm.codexErrorMessage {
+                Divider()
+                Text(codexErr)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
