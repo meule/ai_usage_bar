@@ -59,6 +59,7 @@ class UsageViewModel: ObservableObject {
     @Published var sevenDay: UsageBucket?
     @Published var sevenDaySonnet: UsageBucket?
     @Published var codexLimits: CodexRateLimitSnapshot?
+    @Published var codexSparkLimits: CodexRateLimitSnapshot?
     @Published var codexNeedsLogin = false
     @Published var codexErrorMessage: String?
     @Published var errorMessage: String?
@@ -112,6 +113,7 @@ class UsageViewModel: ObservableObject {
             do {
                 let codex = try await fetchCodexRateLimits()
                 self.codexLimits = preferredCodexSnapshot(from: codex)
+                self.codexSparkLimits = sparkSnapshot(from: codex)
                 self.codexNeedsLogin = false
             } catch {
                 self.codexLimits = nil
@@ -257,10 +259,15 @@ class UsageViewModel: ObservableObject {
         if let codex = response.rateLimitsByLimitId?["codex"] {
             return codex
         }
-        if let any = response.rateLimitsByLimitId?.values.first {
+        if let any = response.rateLimitsByLimitId?.values.first(where: { $0.limitName == nil }) {
             return any
         }
         return response.rateLimits
+    }
+
+    private func sparkSnapshot(from response: CodexRateLimitsResponse) -> CodexRateLimitSnapshot? {
+        // Spark entry has a non-null limitName (e.g. "GPT-5.3-Codex-Spark")
+        return response.rateLimitsByLimitId?.values.first(where: { $0.limitName != nil })
     }
 
     private func resolveCodexExecutable() -> String? {
@@ -374,17 +381,36 @@ struct ClaudeUsageBarApp: App {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
-            } else if vm.codexNeedsLogin {
+            }
+
+            if let spark = vm.codexSparkLimits {
                 Divider()
-                Text("Codex: not logged in")
-                Text("  run `codex login` in Terminal")
+
+                let sparkName = spark.limitName ?? "Codex Spark"
+                Text("\(sparkName) 5-Hour: \(pct(spark.primary?.usedPercent))")
+                Text("  resets \(formatResetTime(epochSeconds: spark.primary?.resetsAt))")
                     .font(.caption)
                     .foregroundColor(.secondary)
-            } else if let codexErr = vm.codexErrorMessage {
-                Divider()
-                Text(codexErr)
+
+                Text("\(sparkName) 7-Day: \(pct(spark.secondary?.usedPercent))")
+                Text("  resets \(formatResetTime(epochSeconds: spark.secondary?.resetsAt))")
                     .font(.caption)
                     .foregroundColor(.secondary)
+            }
+
+            if vm.codexLimits == nil {
+                if vm.codexNeedsLogin {
+                    Divider()
+                    Text("Codex: not logged in")
+                    Text("  run `codex login` in Terminal")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else if let codexErr = vm.codexErrorMessage {
+                    Divider()
+                    Text(codexErr)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
 
             Divider()
