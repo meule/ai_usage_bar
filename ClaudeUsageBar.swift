@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import Foundation
 
 // MARK: - Data Models
@@ -65,6 +66,8 @@ class UsageViewModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var isLoading = false
 
+    var onUpdate: (() -> Void)?
+
     private var timer: Timer?
 
     init() {
@@ -126,6 +129,7 @@ class UsageViewModel: ObservableObject {
                 }
             }
             self.isLoading = false
+            self.onUpdate?()
         }
     }
 
@@ -151,7 +155,6 @@ class UsageViewModel: ObservableObject {
             throw URLError(.userAuthenticationRequired)
         }
 
-        // Parse JSON to extract OAuth token
         guard let jsonData = raw.data(using: .utf8),
               let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
               let oauthObj = json["claudeAiOauth"] as? [String: Any],
@@ -186,7 +189,6 @@ class UsageViewModel: ObservableObject {
             ])
         }
 
-        // Run blocking I/O on a background thread so it never stalls the main actor.
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
                 let process = Process()
@@ -209,11 +211,9 @@ class UsageViewModel: ObservableObject {
                 inputPipe.fileHandleForWriting.write(initMsg)
                 inputPipe.fileHandleForWriting.write(rateMsg)
 
-                // Kill process if no response within 15 seconds.
                 let killWork = DispatchWorkItem { if process.isRunning { process.terminate() } }
                 DispatchQueue.global().asyncAfter(deadline: .now() + 15, execute: killWork)
 
-                // Read byte-by-byte to build lines (blocking, safe on background thread).
                 let handle = outputPipe.fileHandleForReading
                 let decoder = JSONDecoder()
                 var lineData = Data()
@@ -221,7 +221,7 @@ class UsageViewModel: ObservableObject {
 
                 while !resumed {
                     let byte = handle.readData(ofLength: 1)
-                    if byte.isEmpty { break } // EOF — process terminated
+                    if byte.isEmpty { break }
                     if byte == Data([UInt8(ascii: "\n")]) {
                         defer { lineData = Data() }
                         guard !lineData.isEmpty,
@@ -256,45 +256,34 @@ class UsageViewModel: ObservableObject {
     }
 
     private func preferredCodexSnapshot(from response: CodexRateLimitsResponse) -> CodexRateLimitSnapshot {
-        if let codex = response.rateLimitsByLimitId?["codex"] {
-            return codex
-        }
-        if let any = response.rateLimitsByLimitId?.values.first(where: { $0.limitName == nil }) {
-            return any
-        }
+        if let codex = response.rateLimitsByLimitId?["codex"] { return codex }
+        if let any = response.rateLimitsByLimitId?.values.first(where: { $0.limitName == nil }) { return any }
         return response.rateLimits
     }
 
     private func sparkSnapshot(from response: CodexRateLimitsResponse) -> CodexRateLimitSnapshot? {
-        // Spark entry has a non-null limitName (e.g. "GPT-5.3-Codex-Spark")
         return response.rateLimitsByLimitId?.values.first(where: { $0.limitName != nil })
     }
 
     private func resolveCodexExecutable() -> String? {
-        let candidates = [
-            "/usr/local/bin/codex",
-            "/opt/homebrew/bin/codex",
-            "/usr/bin/codex"
-        ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+        ["/usr/local/bin/codex", "/opt/homebrew/bin/codex", "/usr/bin/codex"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
     private func isCodexLoginError(_ message: String) -> Bool {
-        let lowered = message.lowercased()
-        return lowered.contains("not signed in")
-            || lowered.contains("run 'codex login'")
-            || lowered.contains("run `codex login`")
+        let l = message.lowercased()
+        return l.contains("not signed in") || l.contains("run 'codex login'") || l.contains("run `codex login`")
     }
 }
 
 // MARK: - Helpers
 
 func parseISO(_ iso: String) -> Date? {
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let date = formatter.date(from: iso) { return date }
-    formatter.formatOptions = [.withInternetDateTime]
-    return formatter.date(from: iso)
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let d = f.date(from: iso) { return d }
+    f.formatOptions = [.withInternetDateTime]
+    return f.date(from: iso)
 }
 
 func formatResetTime(_ iso: String?) -> String {
@@ -303,130 +292,132 @@ func formatResetTime(_ iso: String?) -> String {
 }
 
 func formatResetTime(epochSeconds: Int?) -> String {
-    guard let epochSeconds else { return "unknown" }
-    let date = Date(timeIntervalSince1970: TimeInterval(epochSeconds))
-    return formatResetTime(date)
+    guard let s = epochSeconds else { return "unknown" }
+    return formatResetTime(Date(timeIntervalSince1970: TimeInterval(s)))
 }
 
 func formatResetTime(_ date: Date) -> String {
     let rel = RelativeDateTimeFormatter()
     rel.unitsStyle = .abbreviated
     let relative = rel.localizedString(for: date, relativeTo: Date())
-
     let abs = DateFormatter()
     abs.dateFormat = "MMM d, HH:mm"
-    let absolute = abs.string(from: date)
-
-    return "\(relative) (\(absolute))"
+    return "\(relative) (\(abs.string(from: date)))"
 }
 
-func pct(_ value: Double) -> String {
-    "\(Int(value))%"
+func pct(_ value: Double) -> String { "\(Int(value))%" }
+func pct(_ value: Int?) -> String { value.map { "\($0)%" } ?? "?" }
+
+// MARK: - App Delegate
+
+@MainActor
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private var statusItem: NSStatusItem!
+    private let vm = UsageViewModel()
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // NSStatusItem is always visible — macOS never hides it for third-party apps
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.button?.title = "C:?"
+
+        let menu = NSMenu()
+        menu.delegate = self
+        statusItem.menu = menu
+
+        vm.onUpdate = { [weak self] in
+            self?.statusItem.button?.title = self?.vm.menuBarTitle ?? "C:?"
+        }
+    }
+
+    // Rebuild menu lazily each time it opens
+    func menuWillOpen(_ menu: NSMenu) {
+        statusItem.button?.title = vm.menuBarTitle
+        menu.removeAllItems()
+
+        if let err = vm.errorMessage {
+            menu.addItem(err, red: true)
+        }
+
+        if let fh = vm.fiveHour {
+            menu.addItem("Claude 5-Hour Session: \(pct(fh.utilization))")
+            menu.addItem("  resets \(formatResetTime(fh.resets_at))", small: true)
+        }
+        if let sd = vm.sevenDay {
+            menu.addItem("Claude 7-Day Week: \(pct(sd.utilization))")
+            menu.addItem("  resets \(formatResetTime(sd.resets_at))", small: true)
+        }
+        if let ss = vm.sevenDaySonnet {
+            menu.addItem("Claude 7-Day Sonnet: \(pct(ss.utilization))")
+            menu.addItem("  resets \(formatResetTime(ss.resets_at))", small: true)
+        }
+
+        if let codex = vm.codexLimits {
+            menu.addItem(.separator())
+            menu.addItem("Codex 5-Hour Session: \(pct(codex.primary?.usedPercent))")
+            menu.addItem("  resets \(formatResetTime(epochSeconds: codex.primary?.resetsAt))", small: true)
+            menu.addItem("Codex 7-Day Week: \(pct(codex.secondary?.usedPercent))")
+            menu.addItem("  resets \(formatResetTime(epochSeconds: codex.secondary?.resetsAt))", small: true)
+            if let plan = codex.planType {
+                menu.addItem("  Plan: \(plan)", small: true)
+            }
+        }
+
+        if let spark = vm.codexSparkLimits {
+            menu.addItem(.separator())
+            let name = spark.limitName ?? "Codex Spark"
+            menu.addItem("\(name) 5-Hour: \(pct(spark.primary?.usedPercent))")
+            menu.addItem("  resets \(formatResetTime(epochSeconds: spark.primary?.resetsAt))", small: true)
+            menu.addItem("\(name) 7-Day: \(pct(spark.secondary?.usedPercent))")
+            menu.addItem("  resets \(formatResetTime(epochSeconds: spark.secondary?.resetsAt))", small: true)
+        }
+
+        if vm.codexLimits == nil {
+            menu.addItem(.separator())
+            if vm.codexNeedsLogin {
+                menu.addItem("Codex: not logged in")
+                menu.addItem("  run `codex login` in Terminal", small: true)
+            } else if let err = vm.codexErrorMessage {
+                menu.addItem(err, small: true)
+            }
+        }
+
+        menu.addItem(.separator())
+
+        let refreshItem = NSMenuItem(
+            title: vm.isLoading ? "Refreshing..." : "Refresh",
+            action: vm.isLoading ? nil : #selector(refresh),
+            keyEquivalent: "r"
+        )
+        refreshItem.target = self
+        menu.addItem(refreshItem)
+
+        let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
+        quitItem.target = self
+        menu.addItem(quitItem)
+    }
+
+    @objc private func refresh() { vm.fetch() }
+    @objc private func quit() { NSApplication.shared.terminate(nil) }
 }
 
-func pct(_ value: Int?) -> String {
-    guard let value else { return "?" }
-    return "\(value)%"
+private extension NSMenu {
+    func addItem(_ title: String, small: Bool = false, red: Bool = false) {
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        var attrs: [NSAttributedString.Key: Any] = [:]
+        if small { attrs[.font] = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize) }
+        if red   { attrs[.foregroundColor] = NSColor.systemRed }
+        item.attributedTitle = NSAttributedString(string: title, attributes: attrs.isEmpty ? [:] : attrs)
+        addItem(item)
+    }
 }
 
-// MARK: - App
+// MARK: - Entry Point
 
 @main
 struct ClaudeUsageBarApp: App {
-    @StateObject private var vm = UsageViewModel()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        MenuBarExtra {
-            if let err = vm.errorMessage {
-                Text("Error: \(err)")
-                    .foregroundColor(.red)
-            }
-
-            if let fh = vm.fiveHour {
-                Text("Claude 5-Hour Session: \(pct(fh.utilization))")
-                Text("  resets \(formatResetTime(fh.resets_at))")
-                    .font(.caption)
-                    .foregroundColor(.primary)
-            }
-
-            if let sd = vm.sevenDay {
-                Text("Claude 7-Day Week: \(pct(sd.utilization))")
-                Text("  resets \(formatResetTime(sd.resets_at))")
-                    .font(.caption)
-                    .foregroundColor(.primary)
-            }
-
-            if let ss = vm.sevenDaySonnet {
-                Text("Claude 7-Day Sonnet: \(pct(ss.utilization))")
-                Text("  resets \(formatResetTime(ss.resets_at))")
-                    .font(.caption)
-                    .foregroundColor(.primary)
-            }
-
-            if let codex = vm.codexLimits {
-                Divider()
-
-                Text("Codex 5-Hour Session: \(pct(codex.primary?.usedPercent))")
-                Text("  resets \(formatResetTime(epochSeconds: codex.primary?.resetsAt))")
-                    .font(.caption)
-                    .foregroundColor(.primary)
-
-                Text("Codex 7-Day Week: \(pct(codex.secondary?.usedPercent))")
-                Text("  resets \(formatResetTime(epochSeconds: codex.secondary?.resetsAt))")
-                    .font(.caption)
-                    .foregroundColor(.primary)
-
-                if let plan = codex.planType {
-                    Text("Codex Plan: \(plan)")
-                        .font(.caption)
-                        .foregroundColor(.primary)
-                }
-            }
-
-            if let spark = vm.codexSparkLimits {
-                Divider()
-
-                let sparkName = spark.limitName ?? "Codex Spark"
-                Text("\(sparkName) 5-Hour: \(pct(spark.primary?.usedPercent))")
-                Text("  resets \(formatResetTime(epochSeconds: spark.primary?.resetsAt))")
-                    .font(.caption)
-                    .foregroundColor(.primary)
-
-                Text("\(sparkName) 7-Day: \(pct(spark.secondary?.usedPercent))")
-                Text("  resets \(formatResetTime(epochSeconds: spark.secondary?.resetsAt))")
-                    .font(.caption)
-                    .foregroundColor(.primary)
-            }
-
-            if vm.codexLimits == nil {
-                if vm.codexNeedsLogin {
-                    Divider()
-                    Text("Codex: not logged in")
-                    Text("  run `codex login` in Terminal")
-                        .font(.caption)
-                        .foregroundColor(.primary)
-                } else if let codexErr = vm.codexErrorMessage {
-                    Divider()
-                    Text(codexErr)
-                        .font(.caption)
-                        .foregroundColor(.primary)
-                }
-            }
-
-            Divider()
-
-            Button(vm.isLoading ? "Refreshing..." : "Refresh") {
-                vm.fetch()
-            }
-            .disabled(vm.isLoading)
-            .keyboardShortcut("r")
-
-            Button("Quit") {
-                NSApplication.shared.terminate(nil)
-            }
-            .keyboardShortcut("q")
-        } label: {
-            Text(vm.menuBarTitle)
-        }
+        Settings { EmptyView() }
     }
 }
