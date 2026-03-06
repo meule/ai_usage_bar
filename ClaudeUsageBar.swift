@@ -346,21 +346,21 @@ struct ClaudeUsageBarApp: App {
                 Text("Claude 5-Hour Session: \(pct(fh.utilization))")
                 Text("  resets \(formatResetTime(fh.resets_at))")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.primary)
             }
 
             if let sd = vm.sevenDay {
                 Text("Claude 7-Day Week: \(pct(sd.utilization))")
                 Text("  resets \(formatResetTime(sd.resets_at))")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.primary)
             }
 
             if let ss = vm.sevenDaySonnet {
                 Text("Claude 7-Day Sonnet: \(pct(ss.utilization))")
                 Text("  resets \(formatResetTime(ss.resets_at))")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.primary)
             }
 
             if let codex = vm.codexLimits {
@@ -369,17 +369,17 @@ struct ClaudeUsageBarApp: App {
                 Text("Codex 5-Hour Session: \(pct(codex.primary?.usedPercent))")
                 Text("  resets \(formatResetTime(epochSeconds: codex.primary?.resetsAt))")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.primary)
 
                 Text("Codex 7-Day Week: \(pct(codex.secondary?.usedPercent))")
                 Text("  resets \(formatResetTime(epochSeconds: codex.secondary?.resetsAt))")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.primary)
 
                 if let plan = codex.planType {
                     Text("Codex Plan: \(plan)")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.primary)
                 }
             }
 
@@ -390,12 +390,12 @@ struct ClaudeUsageBarApp: App {
                 Text("\(sparkName) 5-Hour: \(pct(spark.primary?.usedPercent))")
                 Text("  resets \(formatResetTime(epochSeconds: spark.primary?.resetsAt))")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.primary)
 
                 Text("\(sparkName) 7-Day: \(pct(spark.secondary?.usedPercent))")
                 Text("  resets \(formatResetTime(epochSeconds: spark.secondary?.resetsAt))")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.primary)
             }
 
             if vm.codexLimits == nil {
@@ -404,12 +404,12 @@ struct ClaudeUsageBarApp: App {
                     Text("Codex: not logged in")
                     Text("  run `codex login` in Terminal")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.primary)
                 } else if let codexErr = vm.codexErrorMessage {
                     Divider()
                     Text(codexErr)
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.primary)
                 }
             }
 
