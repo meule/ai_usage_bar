@@ -200,6 +200,7 @@ class UsageViewModel: ObservableObject {
                 process.standardInput = inputPipe
                 process.standardOutput = outputPipe
                 process.standardError = Pipe()
+                process.environment = ProcessInfo.processInfo.environment
 
                 do { try process.run() } catch {
                     continuation.resume(throwing: error)
@@ -212,7 +213,7 @@ class UsageViewModel: ObservableObject {
                 inputPipe.fileHandleForWriting.write(rateMsg)
 
                 let killWork = DispatchWorkItem { if process.isRunning { process.terminate() } }
-                DispatchQueue.global().asyncAfter(deadline: .now() + 15, execute: killWork)
+                DispatchQueue.global().asyncAfter(deadline: .now() + 25, execute: killWork)
 
                 let handle = outputPipe.fileHandleForReading
                 let decoder = JSONDecoder()
