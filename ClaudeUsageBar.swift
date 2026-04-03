@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Foundation
+import Security
 
 // MARK: - Data Models
 
@@ -16,11 +17,14 @@ struct UsageResponse: Codable {
 }
 
 struct ClaudeAccount {
-    let name: String
+    let name: String        // keychain account field
+    var email: String?      // from /api/oauth/account
     var fiveHour: UsageBucket?
     var sevenDay: UsageBucket?
     var sevenDaySonnet: UsageBucket?
     var error: String?
+
+    var displayName: String { email ?? name }
 }
 
 struct CodexRateLimitWindow: Codable {
@@ -123,10 +127,13 @@ class UsageViewModel: ObservableObject {
                 var account = ClaudeAccount(name: name)
                 do {
                     let token = try getOAuthToken(account: name)
-                    let usage = try await fetchUsage(token: token)
-                    account.fiveHour = usage.five_hour
-                    account.sevenDay = usage.seven_day
-                    account.sevenDaySonnet = usage.seven_day_sonnet
+                    async let email = fetchAccountEmail(token: token)
+                    async let usage = fetchUsage(token: token)
+                    account.email = await email
+                    let u = try await usage
+                    account.fiveHour = u.five_hour
+                    account.sevenDay = u.seven_day
+                    account.sevenDaySonnet = u.seven_day_sonnet
                 } catch {
                     account.error = error.localizedDescription
                 }
@@ -155,34 +162,34 @@ class UsageViewModel: ObservableObject {
         }
     }
 
-    // Find all "Claude Code-credentials" account names in the Keychain.
+    // Find all "Claude Code-credentials" account names using native Keychain API (no auth prompt).
     private func discoverClaudeAccountNames() -> [String] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["dump-keychain"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        try? process.run()
-        process.waitUntilExit()
-
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-
-        // Each keychain entry is a block separated by "keychain:".
-        // Find blocks containing "Claude Code-credentials" and extract "acct".
-        var accounts: [String] = []
-        for entry in output.components(separatedBy: "keychain:") {
-            guard entry.contains("\"Claude Code-credentials\"") else { continue }
-            guard let acctRange = entry.range(of: "\"acct\"<blob>=\"") else { continue }
-            let after = entry[acctRange.upperBound...]
-            guard let endQuote = after.firstIndex(of: "\"") else { continue }
-            let name = String(after[..<endQuote])
-            if !name.isEmpty && !accounts.contains(name) {
-                accounts.append(name)
-            }
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: "Claude Code-credentials",
+            kSecReturnAttributes: kCFBooleanTrue as Any,
+            kSecMatchLimit: kSecMatchLimitAll
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess,
+              let items = result as? [[CFString: Any]], !items.isEmpty else {
+            return [""]
         }
+        let names = items.compactMap { $0[kSecAttrAccount] as? String }.filter { !$0.isEmpty }
+        return names.isEmpty ? [""] : names
+    }
 
-        return accounts.isEmpty ? [""] : accounts
+    private func fetchAccountEmail(token: String) async -> String? {
+        var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/account")!)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json["email_address"] as? String
     }
 
     private func getOAuthToken(account: String) throws -> String {
@@ -383,10 +390,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Claude accounts
         let accounts = vm.claudeAccounts
         for (i, account) in accounts.enumerated() {
-            let label = accounts.count > 1 ? "Claude (\(account.name))" : "Claude"
+            let label = accounts.count > 1 ? "Claude (\(account.displayName))" : "Claude"
 
             if let err = account.error {
-                menu.addItem("\(label): \(err)", red: true)
+                menu.addItem("\(label) — \(err)", red: true)
             } else {
                 if let fh = account.fiveHour {
                     menu.addItem("\(label) 5-Hour: \(pct(fh.utilization))")
