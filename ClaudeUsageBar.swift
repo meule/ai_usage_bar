@@ -86,8 +86,8 @@ class UsageViewModel: ObservableObject {
     var menuBarTitle: String {
         if claudeAccounts.isEmpty { return "?|?" }
         let parts = claudeAccounts.map { a -> String in
-            let h = a.fiveHour.map { "\(Int($0.utilization))%" } ?? "?"
-            let w = a.sevenDay.map { "\(Int($0.utilization))%" } ?? "?"
+            let h = a.fiveHour.map { "\(Int($0.utilization))" } ?? "?"
+            let w = a.sevenDay.map { "\(Int($0.utilization))" } ?? "?"
             return "\(h)|\(w)"
         }
         return parts.joined(separator: " ")
