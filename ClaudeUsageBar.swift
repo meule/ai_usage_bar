@@ -83,14 +83,31 @@ class UsageViewModel: ObservableObject {
         startPolling()
     }
 
-    var menuBarTitle: String {
-        if claudeAccounts.isEmpty { return "?|?" }
-        let parts = claudeAccounts.map { a -> String in
-            let h = a.fiveHour.map { "\(Int($0.utilization))" } ?? "?"
-            let w = a.sevenDay.map { "\(Int($0.utilization))" } ?? "?"
-            return "\(h)|\(w)"
+    var menuBarAttributedTitle: NSAttributedString {
+        let normal = NSFont.menuBarFont(ofSize: 0)
+        let bold   = NSFont.boldSystemFont(ofSize: normal.pointSize)
+
+        func segment(_ value: Double?) -> NSAttributedString {
+            let n = value.map { Int($0) }
+            let text = n.map { "\($0)" } ?? "?"
+            let isHot = (n ?? 0) > 90
+            return NSAttributedString(string: text, attributes: [.font: isHot ? bold : normal])
         }
-        return parts.joined(separator: " ")
+
+        let result = NSMutableAttributedString()
+        let sep    = NSAttributedString(string: "|", attributes: [.font: normal])
+        let space  = NSAttributedString(string: " ", attributes: [.font: normal])
+
+        for (i, a) in claudeAccounts.enumerated() {
+            if i > 0 { result.append(space) }
+            result.append(segment(a.fiveHour?.utilization))
+            result.append(sep)
+            result.append(segment(a.sevenDay?.utilization))
+        }
+        if claudeAccounts.isEmpty {
+            result.append(NSAttributedString(string: "?|?", attributes: [.font: normal]))
+        }
+        return result
     }
 
     func startPolling() {
@@ -334,19 +351,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "C:?"
+        statusItem.button?.attributedTitle = NSAttributedString(string: "?|?")
 
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
 
         vm.onUpdate = { [weak self] in
-            self?.statusItem.button?.title = self?.vm.menuBarTitle ?? "C:?"
+            guard let self else { return }
+            self.statusItem.button?.attributedTitle = self.vm.menuBarAttributedTitle
         }
     }
 
     func menuWillOpen(_ menu: NSMenu) {
-        statusItem.button?.title = vm.menuBarTitle
+        statusItem.button?.attributedTitle = vm.menuBarAttributedTitle
         menu.removeAllItems()
 
         // Claude accounts
