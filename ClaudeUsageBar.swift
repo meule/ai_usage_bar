@@ -119,14 +119,12 @@ class UsageViewModel: ObservableObject {
         codexErrorMessage = nil
 
         Task {
-            // Discover all Claude Code accounts in Keychain
-            let accountNames = discoverClaudeAccountNames()
+            let tokens = discoverTokens()
             var accounts: [ClaudeAccount] = []
 
-            for name in accountNames {
-                var account = ClaudeAccount(name: name)
+            for token in tokens {
+                var account = ClaudeAccount(name: "")
                 do {
-                    let token = try getOAuthToken(account: name)
                     async let email = fetchAccountEmail(token: token)
                     async let usage = fetchUsage(token: token)
                     account.email = await email
@@ -162,22 +160,34 @@ class UsageViewModel: ObservableObject {
         }
     }
 
-    // Find all "Claude Code-credentials" account names using native Keychain API (no auth prompt).
-    private func discoverClaudeAccountNames() -> [String] {
+    // Returns tokens to fetch: first from ~/.claude_usage_accounts.json, then Keychain as fallback.
+    private func discoverTokens() -> [String] {
+        let configPath = NSHomeDirectory() + "/.claude_usage_accounts.json"
+        if let data = FileManager.default.contents(atPath: configPath),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let accounts = json["accounts"] as? [[String: Any]] {
+            let tokens = accounts.compactMap { $0["token"] as? String }.filter { !$0.isEmpty }
+            if !tokens.isEmpty { return tokens }
+        }
+        // Fallback: read from Keychain
+        if let token = keychainToken() { return [token] }
+        return []
+    }
+
+    private func keychainToken() -> String? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: "Claude Code-credentials",
-            kSecReturnAttributes: kCFBooleanTrue as Any,
-            kSecMatchLimit: kSecMatchLimitAll
+            kSecReturnData: kCFBooleanTrue as Any,
+            kSecMatchLimit: kSecMatchLimitOne
         ]
         var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess,
-              let items = result as? [[CFString: Any]], !items.isEmpty else {
-            return [""]
-        }
-        let names = items.compactMap { $0[kSecAttrAccount] as? String }.filter { !$0.isEmpty }
-        return names.isEmpty ? [""] : names
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let oauth = json["claudeAiOauth"] as? [String: Any],
+              let token = oauth["accessToken"] as? String else { return nil }
+        return token
     }
 
     private func fetchAccountEmail(token: String) async -> String? {
@@ -190,41 +200,6 @@ class UsageViewModel: ObservableObject {
             return nil
         }
         return json["email_address"] as? String
-    }
-
-    private func getOAuthToken(account: String) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        if account.isEmpty {
-            process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
-        } else {
-            process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-a", account, "-w"]
-        }
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        try process.run()
-        process.waitUntilExit()
-
-        guard process.terminationStatus == 0 else {
-            throw URLError(.userAuthenticationRequired)
-        }
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !raw.isEmpty else {
-            throw URLError(.userAuthenticationRequired)
-        }
-
-        guard let jsonData = raw.data(using: .utf8),
-              let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-              let oauthObj = json["claudeAiOauth"] as? [String: Any],
-              let token = oauthObj["accessToken"] as? String else {
-            throw URLError(.userAuthenticationRequired)
-        }
-
-        return token
     }
 
     private func fetchUsage(token: String) async throws -> UsageResponse {
