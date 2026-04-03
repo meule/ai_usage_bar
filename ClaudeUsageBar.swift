@@ -84,26 +84,13 @@ class UsageViewModel: ObservableObject {
     }
 
     var menuBarTitle: String {
-        let claudePart: String
-        if claudeAccounts.isEmpty {
-            claudePart = "C:?"
-        } else if claudeAccounts.count == 1 {
-            claudePart = "C:\(claudeAccounts[0].sevenDay.map { "\(Int($0.utilization))%" } ?? "?")"
-        } else {
-            let parts = claudeAccounts.map { $0.sevenDay.map { "\(Int($0.utilization))%" } ?? "?" }
-            claudePart = "C:" + parts.joined(separator: "/")
+        if claudeAccounts.isEmpty { return "?|?" }
+        let parts = claudeAccounts.map { a -> String in
+            let h = a.fiveHour.map { "\(Int($0.utilization))%" } ?? "?"
+            let w = a.sevenDay.map { "\(Int($0.utilization))%" } ?? "?"
+            return "\(h)|\(w)"
         }
-
-        let codexPart: String
-        if let weekly = codexLimits?.secondary?.usedPercent {
-            codexPart = " O:\(weekly)%"
-        } else if codexNeedsLogin {
-            codexPart = " O:login"
-        } else {
-            codexPart = " O:?"
-        }
-
-        return claudePart + codexPart
+        return parts.joined(separator: " ")
     }
 
     func startPolling() {
