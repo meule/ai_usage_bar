@@ -15,6 +15,14 @@ struct UsageResponse: Codable {
     let seven_day_sonnet: UsageBucket?
 }
 
+struct ClaudeAccount {
+    let name: String
+    var fiveHour: UsageBucket?
+    var sevenDay: UsageBucket?
+    var sevenDaySonnet: UsageBucket?
+    var error: String?
+}
+
 struct CodexRateLimitWindow: Codable {
     let usedPercent: Int
     let resetsAt: Int?
@@ -56,14 +64,11 @@ struct CodexRPCEnvelope<T: Decodable>: Decodable {
 
 @MainActor
 class UsageViewModel: ObservableObject {
-    @Published var fiveHour: UsageBucket?
-    @Published var sevenDay: UsageBucket?
-    @Published var sevenDaySonnet: UsageBucket?
+    @Published var claudeAccounts: [ClaudeAccount] = []
     @Published var codexLimits: CodexRateLimitSnapshot?
     @Published var codexSparkLimits: CodexRateLimitSnapshot?
     @Published var codexNeedsLogin = false
     @Published var codexErrorMessage: String?
-    @Published var errorMessage: String?
     @Published var isLoading = false
 
     var onUpdate: (() -> Void)?
@@ -75,43 +80,59 @@ class UsageViewModel: ObservableObject {
     }
 
     var menuBarTitle: String {
-        let claudePart = sevenDay.map { "C:\(Int($0.utilization))%" } ?? "C:?"
+        let claudePart: String
+        if claudeAccounts.isEmpty {
+            claudePart = "C:?"
+        } else if claudeAccounts.count == 1 {
+            claudePart = "C:\(claudeAccounts[0].sevenDay.map { "\(Int($0.utilization))%" } ?? "?")"
+        } else {
+            let parts = claudeAccounts.map { $0.sevenDay.map { "\(Int($0.utilization))%" } ?? "?" }
+            claudePart = "C:" + parts.joined(separator: "/")
+        }
+
         let codexPart: String
         if let weekly = codexLimits?.secondary?.usedPercent {
-            codexPart = "O:\(weekly)%"
+            codexPart = " O:\(weekly)%"
         } else if codexNeedsLogin {
-            codexPart = "O:login"
+            codexPart = " O:login"
         } else {
-            codexPart = "O:?"
+            codexPart = " O:?"
         }
-        return "\(claudePart) \(codexPart)"
+
+        return claudePart + codexPart
     }
 
     func startPolling() {
         fetch()
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.fetch()
-            }
+            Task { @MainActor in self?.fetch() }
         }
     }
 
     func fetch() {
         guard !isLoading else { return }
         isLoading = true
-        errorMessage = nil
         codexErrorMessage = nil
 
         Task {
-            do {
-                let token = try getOAuthToken()
-                let usage = try await fetchUsage(token: token)
-                self.fiveHour = usage.five_hour
-                self.sevenDay = usage.seven_day
-                self.sevenDaySonnet = usage.seven_day_sonnet
-            } catch {
-                self.errorMessage = "Claude: \(error.localizedDescription)"
+            // Discover all Claude Code accounts in Keychain
+            let accountNames = discoverClaudeAccountNames()
+            var accounts: [ClaudeAccount] = []
+
+            for name in accountNames {
+                var account = ClaudeAccount(name: name)
+                do {
+                    let token = try getOAuthToken(account: name)
+                    let usage = try await fetchUsage(token: token)
+                    account.fiveHour = usage.five_hour
+                    account.sevenDay = usage.seven_day
+                    account.sevenDaySonnet = usage.seven_day_sonnet
+                } catch {
+                    account.error = error.localizedDescription
+                }
+                accounts.append(account)
             }
+            self.claudeAccounts = accounts
 
             do {
                 let codex = try await fetchCodexRateLimits()
@@ -128,20 +149,54 @@ class UsageViewModel: ObservableObject {
                     self.codexErrorMessage = "Codex: \(message)"
                 }
             }
+
             self.isLoading = false
             self.onUpdate?()
         }
     }
 
-    private func getOAuthToken() throws -> String {
+    // Find all "Claude Code-credentials" account names in the Keychain.
+    private func discoverClaudeAccountNames() -> [String] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        process.arguments = ["dump-keychain"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        try? process.run()
+        process.waitUntilExit()
+
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+        // Each keychain entry is a block separated by "keychain:".
+        // Find blocks containing "Claude Code-credentials" and extract "acct".
+        var accounts: [String] = []
+        for entry in output.components(separatedBy: "keychain:") {
+            guard entry.contains("\"Claude Code-credentials\"") else { continue }
+            guard let acctRange = entry.range(of: "\"acct\"<blob>=\"") else { continue }
+            let after = entry[acctRange.upperBound...]
+            guard let endQuote = after.firstIndex(of: "\"") else { continue }
+            let name = String(after[..<endQuote])
+            if !name.isEmpty && !accounts.contains(name) {
+                accounts.append(name)
+            }
+        }
+
+        return accounts.isEmpty ? [""] : accounts
+    }
+
+    private func getOAuthToken(account: String) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        if account.isEmpty {
+            process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        } else {
+            process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-a", account, "-w"]
+        }
 
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = Pipe()
-
         try process.run()
         process.waitUntilExit()
 
@@ -174,9 +229,7 @@ class UsageViewModel: ObservableObject {
 
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            throw URLError(.badServerResponse, userInfo: [
-                NSLocalizedDescriptionKey: "HTTP \(code)"
-            ])
+            throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "HTTP \(code)"])
         }
 
         return try JSONDecoder().decode(UsageResponse.self, from: data)
@@ -184,9 +237,7 @@ class UsageViewModel: ObservableObject {
 
     private func fetchCodexRateLimits() async throws -> CodexRateLimitsResponse {
         guard let codexPath = resolveCodexExecutable() else {
-            throw URLError(.fileDoesNotExist, userInfo: [
-                NSLocalizedDescriptionKey: "codex CLI not found"
-            ])
+            throw URLError(.fileDoesNotExist, userInfo: [NSLocalizedDescriptionKey: "codex CLI not found"])
         }
 
         return try await withCheckedThrowingContinuation { continuation in
@@ -194,7 +245,6 @@ class UsageViewModel: ObservableObject {
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: codexPath)
                 process.arguments = ["app-server"]
-
                 let inputPipe = Pipe()
                 let outputPipe = Pipe()
                 process.standardInput = inputPipe
@@ -203,8 +253,7 @@ class UsageViewModel: ObservableObject {
                 process.environment = ProcessInfo.processInfo.environment
 
                 do { try process.run() } catch {
-                    continuation.resume(throwing: error)
-                    return
+                    continuation.resume(throwing: error); return
                 }
 
                 let initMsg = Data("{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"ClaudeUsageBar\",\"version\":\"1.0\"},\"capabilities\":{}}}\n".utf8)
@@ -228,11 +277,9 @@ class UsageViewModel: ObservableObject {
                         guard !lineData.isEmpty,
                               let env = try? decoder.decode(CodexRPCEnvelope<CodexRateLimitsResponse>.self, from: lineData),
                               env.id == 2 else { continue }
-
                         killWork.cancel()
                         process.terminate()
                         resumed = true
-
                         if let result = env.result {
                             continuation.resume(returning: result)
                         } else if let rpcError = env.error {
@@ -263,7 +310,7 @@ class UsageViewModel: ObservableObject {
     }
 
     private func sparkSnapshot(from response: CodexRateLimitsResponse) -> CodexRateLimitSnapshot? {
-        return response.rateLimitsByLimitId?.values.first(where: { $0.limitName != nil })
+        response.rateLimitsByLimitId?.values.first(where: { $0.limitName != nil })
     }
 
     private func resolveCodexExecutable() -> String? {
@@ -317,7 +364,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let vm = UsageViewModel()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // NSStatusItem is always visible — macOS never hides it for third-party apps
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "C:?"
 
@@ -330,33 +376,46 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // Rebuild menu lazily each time it opens
     func menuWillOpen(_ menu: NSMenu) {
         statusItem.button?.title = vm.menuBarTitle
         menu.removeAllItems()
 
-        if let err = vm.errorMessage {
-            menu.addItem(err, red: true)
+        // Claude accounts
+        let accounts = vm.claudeAccounts
+        for (i, account) in accounts.enumerated() {
+            let label = accounts.count > 1 ? "Claude (\(account.name))" : "Claude"
+
+            if let err = account.error {
+                menu.addItem("\(label): \(err)", red: true)
+            } else {
+                if let fh = account.fiveHour {
+                    menu.addItem("\(label) 5-Hour: \(pct(fh.utilization))")
+                    menu.addItem("  resets \(formatResetTime(fh.resets_at))", small: true)
+                }
+                if let sd = account.sevenDay {
+                    menu.addItem("\(label) 7-Day: \(pct(sd.utilization))")
+                    menu.addItem("  resets \(formatResetTime(sd.resets_at))", small: true)
+                }
+                if let ss = account.sevenDaySonnet {
+                    menu.addItem("\(label) 7-Day Sonnet: \(pct(ss.utilization))")
+                    menu.addItem("  resets \(formatResetTime(ss.resets_at))", small: true)
+                }
+            }
+            if i < accounts.count - 1 {
+                menu.addItem(.separator())
+            }
         }
 
-        if let fh = vm.fiveHour {
-            menu.addItem("Claude 5-Hour Session: \(pct(fh.utilization))")
-            menu.addItem("  resets \(formatResetTime(fh.resets_at))", small: true)
-        }
-        if let sd = vm.sevenDay {
-            menu.addItem("Claude 7-Day Week: \(pct(sd.utilization))")
-            menu.addItem("  resets \(formatResetTime(sd.resets_at))", small: true)
-        }
-        if let ss = vm.sevenDaySonnet {
-            menu.addItem("Claude 7-Day Sonnet: \(pct(ss.utilization))")
-            menu.addItem("  resets \(formatResetTime(ss.resets_at))", small: true)
+        if vm.claudeAccounts.isEmpty {
+            menu.addItem("Claude: not logged in")
         }
 
+        // Codex
         if let codex = vm.codexLimits {
             menu.addItem(.separator())
-            menu.addItem("Codex 5-Hour Session: \(pct(codex.primary?.usedPercent))")
+            menu.addItem("Codex 5-Hour: \(pct(codex.primary?.usedPercent))")
             menu.addItem("  resets \(formatResetTime(epochSeconds: codex.primary?.resetsAt))", small: true)
-            menu.addItem("Codex 7-Day Week: \(pct(codex.secondary?.usedPercent))")
+            menu.addItem("Codex 7-Day: \(pct(codex.secondary?.usedPercent))")
             menu.addItem("  resets \(formatResetTime(epochSeconds: codex.secondary?.resetsAt))", small: true)
             if let plan = codex.planType {
                 menu.addItem("  Plan: \(plan)", small: true)
