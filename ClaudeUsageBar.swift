@@ -390,22 +390,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Claude accounts
         let accounts = vm.claudeAccounts
         for (i, account) in accounts.enumerated() {
-            let label = accounts.count > 1 ? "Claude (\(account.displayName))" : "Claude"
+            // Always show email as a header line
+            menu.addItem("Claude — \(account.displayName)", bold: true)
 
             if let err = account.error {
-                menu.addItem("\(label) — \(err)", red: true)
+                menu.addItem("  \(err)", small: true, red: true)
             } else {
                 if let fh = account.fiveHour {
-                    menu.addItem("\(label) 5-Hour: \(pct(fh.utilization))")
-                    menu.addItem("  resets \(formatResetTime(fh.resets_at))", small: true)
+                    menu.addItem("  5-Hour: \(pct(fh.utilization))", small: true)
+                    menu.addItem("    resets \(formatResetTime(fh.resets_at))", small: true)
                 }
                 if let sd = account.sevenDay {
-                    menu.addItem("\(label) 7-Day: \(pct(sd.utilization))")
-                    menu.addItem("  resets \(formatResetTime(sd.resets_at))", small: true)
+                    menu.addItem("  7-Day: \(pct(sd.utilization))", small: true)
+                    menu.addItem("    resets \(formatResetTime(sd.resets_at))", small: true)
                 }
                 if let ss = account.sevenDaySonnet {
-                    menu.addItem("\(label) 7-Day Sonnet: \(pct(ss.utilization))")
-                    menu.addItem("  resets \(formatResetTime(ss.resets_at))", small: true)
+                    menu.addItem("  7-Day Sonnet: \(pct(ss.utilization))", small: true)
+                    menu.addItem("    resets \(formatResetTime(ss.resets_at))", small: true)
                 }
             }
             if i < accounts.count - 1 {
@@ -468,12 +469,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 }
 
 private extension NSMenu {
-    func addItem(_ title: String, small: Bool = false, red: Bool = false) {
+    func addItem(_ title: String, small: Bool = false, bold: Bool = false, red: Bool = false) {
         let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         var attrs: [NSAttributedString.Key: Any] = [:]
-        if small { attrs[.font] = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize) }
-        if red   { attrs[.foregroundColor] = NSColor.systemRed }
-        item.attributedTitle = NSAttributedString(string: title, attributes: attrs.isEmpty ? [:] : attrs)
+        let size = small ? NSFont.smallSystemFontSize : NSFont.systemFontSize
+        attrs[.font] = bold ? NSFont.boldSystemFont(ofSize: size) : NSFont.systemFont(ofSize: size)
+        if red { attrs[.foregroundColor] = NSColor.systemRed }
+        item.attributedTitle = NSAttributedString(string: title, attributes: attrs)
         addItem(item)
     }
 }
