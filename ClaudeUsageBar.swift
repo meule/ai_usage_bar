@@ -23,6 +23,7 @@ struct ClaudeAccount {
     var sevenDay: UsageBucket?
     var sevenDaySonnet: UsageBucket?
     var error: String?
+    var needsRelogin: Bool = false
 
     var displayName: String { email ?? name }
 }
@@ -62,6 +63,10 @@ struct CodexRPCEnvelope<T: Decodable>: Decodable {
     let id: Int?
     let result: T?
     let error: CodexRPCError?
+}
+
+enum ClaudeAuthError: Error {
+    case tokenExpired
 }
 
 // MARK: - ViewModel
@@ -136,6 +141,10 @@ class UsageViewModel: ObservableObject {
                     account.fiveHour = u.five_hour
                     account.sevenDay = u.seven_day
                     account.sevenDaySonnet = u.seven_day_sonnet
+                    account.needsRelogin = false
+                } catch ClaudeAuthError.tokenExpired {
+                    account.needsRelogin = true
+                    account.error = "Token expired"
                 } catch {
                     account.error = error.localizedDescription
                 }
@@ -232,9 +241,12 @@ class UsageViewModel: ObservableObject {
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
 
         let (data, response) = try await URLSession.shared.data(for: request)
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
 
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 401 {
+            throw ClaudeAuthError.tokenExpired
+        }
+        guard code == 200 else {
             throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "HTTP \(code)"])
         }
 
@@ -393,7 +405,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Always show email as a header line
             menu.addItem("Claude — \(account.displayName)", bold: true)
 
-            if let err = account.error {
+            if account.needsRelogin {
+                let item = NSMenuItem(title: "  ⚠️ Token expired — Re-login", action: #selector(relogin), keyEquivalent: "")
+                item.target = self
+                item.representedObject = account.displayName
+                menu.addItem(item)
+            } else if let err = account.error {
                 menu.addItem("  \(err)", small: true, red: true)
             } else {
                 if let fh = account.fiveHour {
@@ -466,6 +483,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func refresh() { vm.fetch() }
     @objc private func quit() { NSApplication.shared.terminate(nil) }
+
+    @objc private func relogin(_ sender: NSMenuItem) {
+        let script = """
+        tell application "Terminal"
+            activate
+            do script "claude /login"
+        end tell
+        """
+        NSAppleScript(source: script)?.executeAndReturnError(nil)
+    }
 }
 
 private extension NSMenu {
