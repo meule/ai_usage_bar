@@ -198,15 +198,23 @@ class UsageViewModel: ObservableObject {
         if let live = keychainEntry,
            let liveToken = live["accessToken"] as? String {
             let liveEmail = fetchEmailSync(token: liveToken)
-            if let idx = entries.firstIndex(where: { ($0["email"] as? String) == liveEmail && liveEmail != nil }) {
+            let liveRefresh = live["refreshToken"] as? String
+            // Match by email (preferred) or refreshToken (fallback for old entries)
+            let idx = entries.firstIndex(where: { entry in
+                if let em = liveEmail, let stored = entry["email"] as? String { return em == stored }
+                if let rt = liveRefresh, let stored = entry["refreshToken"] as? String { return rt == stored }
+                return false
+            })
+            if let idx {
                 // Update existing entry for this account with fresh tokens
                 entries[idx]["accessToken"] = liveToken
-                entries[idx]["refreshToken"] = live["refreshToken"]
+                entries[idx]["refreshToken"] = liveRefresh as Any
                 entries[idx]["expiresAt"] = live["expiresAt"]
+                if let liveEmail { entries[idx]["email"] = liveEmail }
             } else {
                 // New account — add it with email for future matching
                 var entry = live
-                entry["email"] = liveEmail as Any
+                if let liveEmail { entry["email"] = liveEmail }
                 entries.append(entry)
                 let updated: [String: Any] = ["accounts": entries]
                 if let data = try? JSONSerialization.data(withJSONObject: updated, options: .prettyPrinted) {

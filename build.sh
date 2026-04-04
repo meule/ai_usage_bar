@@ -49,6 +49,9 @@ PLIST
 # Add to Login Items (start at login)
 osascript -e "tell application \"System Events\" to make login item at end with properties {path:\"${APP_BUNDLE}\", hidden:false}" 2>/dev/null || true
 
+# Ad-hoc sign so macOS remembers Keychain permissions across rebuilds
+codesign --force --sign - "${APP_BUNDLE}" 2>/dev/null || true
+
 echo "Built ${APP_BUNDLE}"
 echo "Added to Login Items (starts at login)"
 echo "Run with: open ${APP_BUNDLE}"
