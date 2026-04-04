@@ -493,6 +493,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
+        let loginItem = NSMenuItem(title: "Login / Add Account", action: #selector(relogin(_:)), keyEquivalent: "l")
+        loginItem.target = self
+        menu.addItem(loginItem)
+
         let refreshItem = NSMenuItem(
             title: vm.isLoading ? "Refreshing..." : "Refresh",
             action: vm.isLoading ? nil : #selector(refresh),
