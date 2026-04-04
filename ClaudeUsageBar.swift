@@ -194,15 +194,20 @@ class UsageViewModel: ObservableObject {
             entries = accounts
         }
 
-        // If Keychain has a token, update the matching config entry (by refreshToken)
-        // so it stays fresh, or add it if not present
-        if let live = keychainEntry {
-            let liveRefresh = live["refreshToken"] as? String ?? ""
-            if let idx = entries.firstIndex(where: { ($0["refreshToken"] as? String) == liveRefresh && !liveRefresh.isEmpty }) {
-                entries[idx]["accessToken"] = live["accessToken"]
+        // If Keychain has a live token, fetch its email and update/add the matching config entry.
+        if let live = keychainEntry,
+           let liveToken = live["accessToken"] as? String {
+            let liveEmail = fetchEmailSync(token: liveToken)
+            if let idx = entries.firstIndex(where: { ($0["email"] as? String) == liveEmail && liveEmail != nil }) {
+                // Update existing entry for this account with fresh tokens
+                entries[idx]["accessToken"] = liveToken
+                entries[idx]["refreshToken"] = live["refreshToken"]
+                entries[idx]["expiresAt"] = live["expiresAt"]
             } else {
-                // New account not yet in config — add it
-                entries.append(live)
+                // New account — add it with email for future matching
+                var entry = live
+                entry["email"] = liveEmail as Any
+                entries.append(entry)
                 let updated: [String: Any] = ["accounts": entries]
                 if let data = try? JSONSerialization.data(withJSONObject: updated, options: .prettyPrinted) {
                     try? data.write(to: URL(fileURLWithPath: configPath))
@@ -211,6 +216,22 @@ class UsageViewModel: ObservableObject {
         }
 
         return entries.compactMap { $0["accessToken"] as? String }.filter { !$0.isEmpty }
+    }
+
+    private func fetchEmailSync(token: String) -> String? {
+        var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/account")!)
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        var email: String?
+        let sem = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: req) { data, _, _ in
+            if let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                email = json["email_address"] as? String
+            }
+            sem.signal()
+        }.resume()
+        sem.wait()
+        return email
     }
 
     private func keychainOAuth() -> [String: Any]? {
