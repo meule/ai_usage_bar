@@ -67,6 +67,7 @@ struct CodexRPCEnvelope<T: Decodable>: Decodable {
 
 enum ClaudeAuthError: Error {
     case tokenExpired
+    case rateLimited
 }
 
 // MARK: - ViewModel
@@ -105,9 +106,10 @@ class UsageViewModel: ObservableObject {
 
         for (i, a) in claudeAccounts.enumerated() {
             if i > 0 { result.append(space) }
-            result.append(segment(a.fiveHour?.utilization))
+            let limited = a.error == "Rate limited (100%)"
+            result.append(segment(a.fiveHour?.utilization ?? (limited ? 100 : nil)))
             result.append(sep)
-            result.append(segment(a.sevenDay?.utilization))
+            result.append(segment(a.sevenDay?.utilization ?? (limited ? 100 : nil)))
         }
         if claudeAccounts.isEmpty {
             result.append(NSAttributedString(string: "?|?", attributes: [.font: normal]))
@@ -145,6 +147,9 @@ class UsageViewModel: ObservableObject {
                 } catch ClaudeAuthError.tokenExpired {
                     account.needsRelogin = true
                     account.error = "Token expired"
+                } catch ClaudeAuthError.rateLimited {
+                    // Keep stale data, just note it
+                    account.error = "Rate limited (100%)"
                 } catch {
                     account.error = error.localizedDescription
                 }
@@ -243,9 +248,8 @@ class UsageViewModel: ObservableObject {
         let (data, response) = try await URLSession.shared.data(for: request)
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
 
-        if code == 401 {
-            throw ClaudeAuthError.tokenExpired
-        }
+        if code == 401 { throw ClaudeAuthError.tokenExpired }
+        if code == 429 { throw ClaudeAuthError.rateLimited }
         guard code == 200 else {
             throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "HTTP \(code)"])
         }
