@@ -522,10 +522,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func quit() { NSApplication.shared.terminate(nil) }
 
     @objc private func relogin(_ sender: NSMenuItem) {
+        // Find claude binary — check common install locations
+        let candidates = [
+            "\(NSHomeDirectory())/.local/bin/claude",
+            "/usr/local/bin/claude",
+            "/opt/homebrew/bin/claude",
+        ]
+        let claudePath = candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+            ?? "claude"
         let script = """
         tell application "Terminal"
             activate
-            do script "claude /login"
+            do script "\(claudePath) /login"
         end tell
         """
         NSAppleScript(source: script)?.executeAndReturnError(nil)
