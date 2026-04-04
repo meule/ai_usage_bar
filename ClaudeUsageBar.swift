@@ -164,21 +164,42 @@ class UsageViewModel: ObservableObject {
         }
     }
 
-    // Returns tokens to fetch: first from ~/.claude_usage_accounts.json, then Keychain as fallback.
+    // Returns tokens: reads config file, but always syncs the current Keychain token
+    // into whichever config entry matches (keeping it fresh after Claude Code refreshes it).
     private func discoverTokens() -> [String] {
         let configPath = NSHomeDirectory() + "/.claude_usage_accounts.json"
+
+        // Always read the current live token from Keychain
+        let keychainEntry = keychainOAuth()
+
+        // Load config file
+        var entries: [[String: Any]] = []
         if let data = FileManager.default.contents(atPath: configPath),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let accounts = json["accounts"] as? [[String: Any]] {
-            let tokens = accounts.compactMap { $0["token"] as? String }.filter { !$0.isEmpty }
-            if !tokens.isEmpty { return tokens }
+            entries = accounts
         }
-        // Fallback: read from Keychain
-        if let token = keychainToken() { return [token] }
-        return []
+
+        // If Keychain has a token, update the matching config entry (by refreshToken)
+        // so it stays fresh, or add it if not present
+        if let live = keychainEntry {
+            let liveRefresh = live["refreshToken"] as? String ?? ""
+            if let idx = entries.firstIndex(where: { ($0["refreshToken"] as? String) == liveRefresh && !liveRefresh.isEmpty }) {
+                entries[idx]["accessToken"] = live["accessToken"]
+            } else {
+                // New account not yet in config — add it
+                entries.append(live)
+                let updated: [String: Any] = ["accounts": entries]
+                if let data = try? JSONSerialization.data(withJSONObject: updated, options: .prettyPrinted) {
+                    try? data.write(to: URL(fileURLWithPath: configPath))
+                }
+            }
+        }
+
+        return entries.compactMap { $0["accessToken"] as? String }.filter { !$0.isEmpty }
     }
 
-    private func keychainToken() -> String? {
+    private func keychainOAuth() -> [String: Any]? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: "Claude Code-credentials",
@@ -189,9 +210,8 @@ class UsageViewModel: ObservableObject {
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
               let data = result as? Data,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let oauth = json["claudeAiOauth"] as? [String: Any],
-              let token = oauth["accessToken"] as? String else { return nil }
-        return token
+              let oauth = json["claudeAiOauth"] as? [String: Any] else { return nil }
+        return oauth
     }
 
     private func fetchAccountEmail(token: String) async -> String? {
